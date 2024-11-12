@@ -5,20 +5,20 @@ use std::{
     fs::File,
     io::{BufRead, BufReader, Error, Read, Seek},
     path::Path,
-    sync::{Arc, Mutex},
-    thread,
 };
 
-use d4::{find_tracks, ssio::D4TrackReader, Chrom};
+
+use d4::{
+    find_tracks,
+    ssio::D4TrackReader,
+    Chrom,
+};
 use d4_framefile::{Directory, OpenResult};
+
 use regex::Regex;
 use clap::{Arg, App};
 use rayon::prelude::*;
-use rand::seq::SliceRandom;
-use rand::thread_rng;
-use itertools::Itertools; // 添加这行来引入 Itertools trait
 
-#[derive(Debug, Clone, Copy)]
 struct Range {
     length: u32,
     value: u16
@@ -29,67 +29,94 @@ fn parse_region_spec<T: Iterator<Item = String>>(
     chrom_list: &[Chrom],
 ) -> std::io::Result<Vec<(usize, u32, u32)>> {
     let region_pattern = Regex::new(r"^(?P<CHR>[^:]+)((:(?P<FROM>\d+)-)?(?P<TO>\d+)?)?$").unwrap();
+    let mut ret = Vec::new();
+
     let chr_map: HashMap<_, _> = chrom_list
         .iter()
         .enumerate()
         .map(|(a, b)| (b.name.to_string(), a))
         .collect();
 
-    Ok(regions.map_or_else(
-        || chrom_list.iter().enumerate().map(|(id, chrom)| (id, 0, chrom.size as u32)).collect(),
-        |regions| regions.filter_map(|region_spec| {
-            region_pattern.captures(&region_spec).and_then(|captures| {
+    if let Some(regions) = regions {
+        for region_spec in regions {
+            if let Some(captures) = region_pattern.captures(&region_spec) {
                 let chr = captures.name("CHR").unwrap().as_str();
-                let start: u32 = captures.name("FROM").map_or(0, |x| x.as_str().parse().unwrap_or(0));
-                let end: u32 = captures.name("TO").map_or_else(
-                    || chr_map.get(chr).map_or(!0, |&id| chrom_list[id].size as u32),
-                    |x| x.as_str().parse().unwrap_or(!0)
-                );
-                chr_map.get(chr).map(|&chr| (chr, start, end))
-            }).or_else(|| {
-                eprintln!("警告：忽略未在d4文件中定义的染色体 {}", region_spec);
-                None
-            })
-        }).collect()
-    ))
+                let start: u32 = captures
+                    .name("FROM")
+                    .map_or(0u32, |x| x.as_str().parse().unwrap_or(0));
+                let end: u32 = captures
+                    .name("TO")
+                    .map_or_else(|| {
+                        chr_map.get(chr).map_or(!0, |&id| chrom_list[id].size as u32)
+                    }, |x| {
+                        x.as_str().parse().unwrap_or(!0)
+                    });
+                if let Some(&chr) = chr_map.get(chr) {
+                    ret.push((chr, start, end));
+                } else {
+                    eprintln!("Warning: ignore chromosome {} which is not defined in d4 file", chr);
+                }
+                continue;
+            } else {
+                return Err(Error::new(std::io::ErrorKind::Other, "Invalid region spec"));
+            }
+        }
+    } else {
+        for (id, chrom) in chrom_list.iter().enumerate() {
+            ret.push((id, 0, chrom.size as u32));
+        }
+    }
+
+    ret.sort_unstable();
+
+    Ok(ret)
 }
 
+
 fn add_one_interval(
-    length: u32,
+    chr: & str,
+    left: u32,
+    right: u32,
     values: &[i32],
-    vect: &mut Vec<Range>,
+    vect:  &mut Vec<Range>,
     all_length: &mut u64,
     totaldepth: &mut u64,
     depthx1: &mut u64
 ) {
-    *all_length += length as u64;
-    
-    for &value in values {
-        let value_u32 = value as u32;
-        *totaldepth += (length as u64) * (value_u32 as u64);
-        if value_u32 >= 1 {
-            *depthx1 += length as u64;
-        }
-        vect.push(Range { length, value: value as u16 });
+    // println!("{:?}", values);
+    for value in values.iter()
+    {
+        let vaue_t = *value as u32;
+        let length = right - left;
+        *all_length += length as u64;
+        let interval_depths = (length*vaue_t) as u64;
+        *totaldepth += interval_depths;
+        if vaue_t >=1 {*depthx1 +=length as u64; };
+        vect.push(Range{length:length,  value: value.clone() as u16 });
     }
+
 }
 
-fn add_some_interval<R: Read + Seek>(
+
+fn add_some_interval <R: Read + Seek>( 
     inputs: &mut [D4TrackReader<R>],
     regions: &[(usize, u32, u32)],
-    vect: &mut Vec<Range>,
+    vect: & mut Vec<Range>,
     all_length: &mut u64,
     totaldepth: &mut u64,
     depthx1: &mut u64
-) -> u32 {
-    if inputs.is_empty() {
-        return 1;
-    }
-    
-    for &(cid, begin, end) in regions {
-        let chrom = inputs[0].chrom_list()[cid].name.as_str().to_string();
+    ) -> u32
+    {
+        if inputs.is_empty() {
+            return 1;
+        }
+        for &(cid, begin, end) in regions {
+        let chrom_list = inputs[0].chrom_list();
+        let chrom = chrom_list[cid].name.as_str().to_string();
+
         let mut values = vec![0; inputs.len()];
         let mut prev_values = vec![0; inputs.len()];
+
         let mut views: Vec<_> = inputs
             .iter_mut()
             .map(|x| x.get_view(&chrom, begin, end).unwrap())
@@ -100,166 +127,181 @@ fn add_some_interval<R: Read + Seek>(
 
         for pos in begin..end {
             for (input_id, input) in views.iter_mut().enumerate() {
-                if let Ok((reported_pos, value)) = input.next().unwrap() {
-                    debug_assert_eq!(reported_pos, pos);
-                    if values[input_id] != value {
-                        if !value_changed {
-                            prev_values.copy_from_slice(&values);
-                            value_changed = true;
-                        }
-                        values[input_id] = value;
+                let Ok((reported_pos, value)) = input.next().unwrap()  else { todo!() };
+                assert_eq!(reported_pos, pos);
+                if values[input_id] != value {
+                    if !value_changed {
+                        prev_values.clone_from(&values);
+                        value_changed = true;
                     }
+                    values[input_id] = value;
                 }
             }
             if value_changed {
-                add_one_interval(pos - last_pos, &prev_values, vect, all_length, totaldepth, depthx1);
+                add_one_interval(&chrom,last_pos,pos, prev_values.as_slice(), vect, all_length, totaldepth, depthx1);
                 last_pos = pos;
                 value_changed = false;
             }
         }
         if last_pos != end {
-            add_one_interval(end - last_pos, &prev_values, vect, all_length, totaldepth, depthx1);
+            add_one_interval(&chrom, last_pos, end, prev_values.as_slice(), vect, all_length, totaldepth, depthx1);
         }
     }
-    0
-}
+    return  0;
+    }
 
-fn add_ranges<R: Read + Seek, I: Iterator<Item = String>>(  
+fn add_ranges <R: Read + Seek, I: Iterator<Item = String>> (  
     mut reader: R,
-    pattern: &Regex,
+    pattern: Regex,
     track: Option<&str>,
     regions: Option<I>,
-    vect: &mut Vec<Range>,
+    vect: & mut Vec<Range>,
     all_length: &mut u64,
     totaldepth: &mut u64, 
-    depthx1: &mut u64
-) -> u32 {
-    let mut path_buf = vec![];
-    if let Some(track_path) = track {
-        path_buf.push(track_path.into());
-    } else {
-        find_tracks(
-            &mut reader,
-            |path| {
-                let stem = path.and_then(|p| p.file_name()).map_or(Cow::Borrowed(""), |x| x.to_string_lossy());
-                pattern.is_match(stem.borrow())
-            },
-            &mut path_buf,
-        );
-    }
-    
-    let file_root = Directory::open_root(reader, 8).unwrap();
-    let readers: Vec<_> = path_buf.iter()
-        .filter_map(|path| {
-            match file_root.open(path).unwrap() {
-                OpenResult::SubDir(track_root) => Some(D4TrackReader::from_track_root(track_root).unwrap()),
-                _ => None,
-            }
-        })
-        .collect();
-    
-    if readers.is_empty() {
-        return 0;
-    }
-    
-    let regions = parse_region_spec(regions, readers[0].chrom_list()).unwrap();
-    add_some_interval(&mut readers.into_iter().collect::<Vec<_>>(), &regions, vect, all_length, totaldepth, depthx1)
-}
-
-fn read_regions(region_file: &str) -> Vec<String> {
-    BufReader::new(File::open(region_file).unwrap())
-        .lines()
-        .filter_map(|line| {
-            let line = line.unwrap();
-            if line.starts_with('#') {
-                return None;
-            }
-            let mut splitted = line.trim().split('\t');
-            match (splitted.next(), splitted.next(), splitted.next()) {
-                (Some(chr), Some(beg), Some(end)) => {
-                    beg.parse::<u32>().ok().and_then(|begin| {
-                        end.parse::<u32>().ok().map(|end| {
-                            format!("{}:{}-{}", chr, begin, end)
+    depthx1: &mut u64)  -> u32 {
+        let first =false;
+        let mut path_buf = vec![];
+        let mut first_found = false;
+        if let Some(track_path) = track {
+            path_buf.push(track_path.into());
+        } else {
+            find_tracks(
+                &mut reader,
+                |path| {
+                    let stem = path
+                        .map(|what: &Path| {
+                            what.file_name()
+                                .map(|x| x.to_string_lossy())
+                                .unwrap_or_else(|| Cow::<str>::Borrowed(""))
                         })
-                    })
+                        .unwrap_or_default();
+                    if pattern.is_match(stem.borrow()) {
+                        if first && first_found {
+                            false
+                        } else {
+                            first_found = true;
+                            true
+                        }
+                    } else {
+                        false
+                    }
                 },
-                _ => None
-            }
-        })
-        .collect()
-}
+                &mut path_buf,
+            );
+        }
+        let file_root = Directory::open_root(reader, 8).unwrap();
+        let mut readers = vec![];
+        for path in path_buf.iter() {
+        let  track_root = match file_root.open(path).unwrap() {
+                OpenResult::SubDir(track_root) => track_root,
+                _ => {
+                    return 0;
+                }
+            };
+            let reader = D4TrackReader::from_track_root(track_root).unwrap();
+            readers.push(reader);
+        }
+        let regions = parse_region_spec(regions, readers[0].chrom_list()).unwrap();
+        add_some_interval(& mut readers, &regions, vect, all_length, totaldepth, depthx1);
+        return  0;
 
-fn quick_select(interval_depth: &[Range], k: u64) -> u16 {
-    if interval_depth.len() == 1 {
-        return interval_depth[0].value;
     }
 
-    let mut rng = thread_rng();
-    let pivot = *interval_depth.choose(&mut rng).unwrap();
     
-    let (left, equal, right): (Vec<_>, Vec<_>, Vec<_>) = interval_depth.iter()
-        .partition_map(|&range| {
-            if range.value < pivot.value { itertools::Either::Left(range) }
-            else if range.value > pivot.value { itertools::Either::Right(range) }
-            else { itertools::Either::Both(range) }
-        });
+fn all_d4_vec(input_filename: & str,region_file:&str, vect: & mut Vec<Range>, all_length: &mut u64,totaldepth: &mut u64, depthx1: &mut u64 ) -> u32 {
+    let regions =  {
+        let mut file = BufReader::new(File::open(region_file).unwrap());
+        let mut buf = String::new();
+        let mut region_list = Vec::new();
+        while file.read_line(&mut buf).unwrap() > 0 {
+            if &buf[..1] == "#" {
+                continue;
+            }
+            let mut splitted = buf.trim().split('\t');
+            let (raw_chr, raw_beg, raw_end) = (splitted.next(), splitted.next(), splitted.next());
+            if raw_chr.is_some() && raw_beg.is_some() && raw_end.is_some() {
+                if let Ok(begin) = raw_beg.unwrap().parse::<u32>() {
+                    if let Ok(end) = raw_end.unwrap().parse::<u32>() {
+                        region_list.push(format!("{}:{}-{}", raw_chr.unwrap(), begin, end));
+                    }
+                }
+                buf.clear();
+                continue;
+            }
+            panic!("Invalid bed file");
+        }
+        Some(region_list.into_iter())
+    };
+    let track_path = None;
+    let track_pattern =  regex::Regex::new(".*").unwrap();
+    let reader = File::open(input_filename).unwrap();
+    add_ranges( reader, track_pattern, track_path, regions,vect, all_length, totaldepth, depthx1);
+    return 0;
+}
 
-    let left_sum: u64 = left.iter().map(|r| r.length as u64).sum();
-    let equal_sum: u64 = equal.iter().map(|r| r.length as u64).sum();
 
-    if k < left_sum {
-        quick_select(&left, k)
-    } else if k < left_sum + equal_sum {
-        pivot.value
-    } else {
-        quick_select(&right, k - left_sum - equal_sum)
+
+fn cov_stat(interval_depth: &Vec<Range>, all_length: &mut u64, mean: &f64, depthx1: &mut u64)
+{
+    let mut idx :u64 = 0;
+    let mut  x1:u64 = 0;
+    let mut  x10:u64 = 0;
+    let mut  x20:u64 = 0;
+    let mut  x30:u64 = 0;
+    let mut  x50:u64 = 0;
+
+    let idx_q20: u64 = (*depthx1)*2 /10;
+    let mut variance:f64= 0.0;
+    let mut  q20 :u16 = 0;
+    let mut jixu: bool = true;
+
+    // 计算 q20% 
+    let mut large_avg_20: u64 = 0;
+    let mut less_avg_20: u64 = 0;
+    let avg_p20 = (*mean as f64) * 0.2;
+
+
+    for range_value in interval_depth.iter()
+    {
+        let value = range_value.value;
+        let length = range_value.length as u64;
+        if value >=1 {x1+=length; idx += length;}
+        if value >=10 {x10+=length; }
+        if value >=20 {x20+=length;}
+        if value >=30 {x30+=length;}
+        if value >=50 {x50+=length;}
+        let dis = (value as f64) - mean;
+        let pow2 = dis*dis ;
+        variance +=  pow2 * (length as f64);
+        if jixu {
+            if idx >= idx_q20{
+                q20 = value; 
+                jixu =false;}
+        }
+
+        if (value as f64)  > avg_p20 { large_avg_20 +=length;}
+        else {less_avg_20 +=length;}
     }
-}
-fn cov_stat(interval_depth: &[Range], all_length: &mut u64, mean: &f64, depthx1: &u64) {
-    let all_length_f64 = *all_length as f64;
 
-    let stats = interval_depth.par_iter().map(|range| {
-        let value = range.value as f64;
-        let length = range.length as u64;
-        let dis = value - mean;
-        (
-            if value >= 1.0 { length } else { 0 },
-            if value >= 10.0 { length } else { 0 },
-            if value >= 20.0 { length } else { 0 },
-            if value >= 30.0 { length } else { 0 },
-            if value >= 50.0 { length } else { 0 },
-            dis * dis * (length as f64),
-            if value > mean * 0.2 { length } else { 0 },
-        )
-    }).reduce(|| (0, 0, 0, 0, 0, 0.0, 0),
-               |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3, a.4 + b.4, a.5 + b.5, a.6 + b.6));
 
-    let (x1, x10, x20, x30, x50, variance_sum, large_avg_20) = stats;
-
-    let variance = variance_sum / all_length_f64;
-    let std_deviation = variance.sqrt();
-    let x1_cov = (x1 as f64) / all_length_f64 * 100.0;
-    let x10_cov = (x10 as f64) / all_length_f64 * 100.0;
-    let x20_cov = (x20 as f64) / all_length_f64 * 100.0;
-    let x30_cov = (x30 as f64) / all_length_f64 * 100.0;
-    let x50_cov = (x50 as f64) / all_length_f64 * 100.0;
-    let cv = std_deviation / mean;
-    let q20_cov = (large_avg_20 as f64) / all_length_f64 * 100.0;
-
-    let idx_q20 = *depthx1 / 5;
-    let q20 = quick_select(interval_depth, idx_q20);
-
+    let all_lenth_f64 = all_length.clone() as f64;
+    variance /= all_lenth_f64;
+    let  std_deviation = variance.sqrt();
+    let x1_cov = (x1 as f64)  / all_lenth_f64 * 100.0;
+    let x10_cov = (x10 as f64)  / all_lenth_f64 * 100.0 ;
+    let x20_cov = (x20 as f64)  / all_lenth_f64* 100.0;
+    let x30_cov = (x30 as f64)  / all_lenth_f64* 100.0;
+    let x50_cov = (x50 as f64)  / all_lenth_f64* 100.0;
     let fold80 = (q20 as f64) / mean;
+    let cv =  std_deviation / mean;
 
-    //println!("总碱基数\t覆盖碱基数\t覆盖率\t平均深度(X)\t深度>=1X\t深度>=10X\t深度>=20X\t深度>=30X\t深度>=50X\tFold80\t变异系数\t>=20%X");
+    let q20_cov = (large_avg_20 as f64 ) / ((large_avg_20 + less_avg_20 ) as f64) *100.0;
     println!("TotalBases\tCovBases\tCovRatio\tAve_Depth(X)\tDepth>=1X\tDepth>=10X\tDepth>=20X\tDepth>=30X\tDepth>=50X\tFold80\tCV\t>=20%X");
-    println!("{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}", 
-             all_length, x1, x1_cov, mean, x1_cov, x10_cov, x20_cov, x30_cov, x50_cov, fold80, cv, q20_cov);
+    println!("{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}", all_length, x1, x1_cov, mean, x1_cov, x10_cov, x20_cov, x30_cov, x50_cov, fold80, cv, q20_cov);
 }
+
 
 fn main() {
-    let start_time = Instant::now();
-
     let args = App::new("BamCov")
         .version("0.1")
         .author("liuqingshan")
@@ -276,87 +318,36 @@ fn main() {
             .takes_value(true)
             .required(true)
             .help("输入为bed文件格式"))
-        .arg(Arg::with_name("threads")
-            .short("t")
-            .long("threads")
-            .takes_value(true)
-            .default_value("4")
-            .help("使用的线程数"))
         .get_matches();
 
-    let input_filename = args.value_of("d4-file").unwrap();
-    let region_file = args.value_of("region-file").unwrap();
-    let thread_count: usize = args.value_of("threads").unwrap().parse().expect("无效的线程数");
+        let input_filename :&str= args
+        .value_of("d4-file")
+        .unwrap()
+        .trim();
+        let region_file :&str = args
+        .value_of("region-file")
+        .unwrap()
+        .trim();
 
-    let regions = Arc::new(read_regions(region_file));
-    let chunk_size = (regions.len() + thread_count - 1) / thread_count;
+    let start_time = Instant::now();
 
-    let vect = Arc::new(Mutex::new(Vec::new()));
-    let all_length = Arc::new(Mutex::new(0u64));
-    let totaldepth = Arc::new(Mutex::new(0u64));
-    let depthx1 = Arc::new(Mutex::new(0u64));
 
-    let handles: Vec<_> = (0..thread_count).map(|i| {
-        let start = i * chunk_size;
-        let end = std::cmp::min((i + 1) * chunk_size, regions.len());
-        
-        let regions = Arc::clone(&regions);
-        let vect = Arc::clone(&vect);
-        let all_length = Arc::clone(&all_length);
-        let totaldepth = Arc::clone(&totaldepth);
-        let depthx1 = Arc::clone(&depthx1);
-        let input_filename = input_filename.to_string();
+    let mut all_length:u64 = 0;
+    let mut totaldepth:u64 = 0;
+    let mut depthx1: u64 = 0;
+    let mut interval_depth: Vec<Range> = Vec::new();
+    all_d4_vec(input_filename, region_file, &mut interval_depth, &mut all_length, &mut totaldepth, &mut depthx1);
+    let start2 = Instant::now();
+    interval_depth.par_sort_unstable_by(|a, b| b.value.cmp(&a.value));
+    let duration2 = start2.elapsed();
+    //println!("排序用时: {:?}", duration2);
+    let mean: f64 = (totaldepth as f64) / (all_length as f64);
+    cov_stat(& interval_depth, & mut all_length, & mean, &mut depthx1); 
 
-        thread::spawn(move || {
-            let mut local_vect = Vec::new();
-            let mut local_all_length = 0u64;
-            let mut local_totaldepth = 0u64;
-            let mut local_depthx1 = 0u64;
+    // 在主要处理完成后，记录最终内存使用和 CPU 时间
 
-            let mut reader = File::open(&input_filename).unwrap();
-            let track_pattern = Regex::new(".*").unwrap();
-
-            for region in &regions[start..end] {
-                add_ranges(
-                    &mut reader,
-                    &track_pattern,
-                    None,
-                    Some(std::iter::once(region.clone())),
-                    &mut local_vect,
-                    &mut local_all_length,
-                    &mut local_totaldepth,
-                    &mut local_depthx1,
-                );
-                reader.rewind().unwrap();
-            }
-
-            let mut vect = vect.lock().unwrap();
-            vect.extend(local_vect);
-            
-            let mut all_length = all_length.lock().unwrap();
-            *all_length += local_all_length;
-            
-            let mut totaldepth = totaldepth.lock().unwrap();
-            *totaldepth += local_totaldepth;
-            
-            let mut depthx1 = depthx1.lock().unwrap();
-            *depthx1 += local_depthx1;
-        })
-    }).collect();
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    let vect = Arc::try_unwrap(vect).unwrap().into_inner().unwrap();
-    let mut all_length = Arc::try_unwrap(all_length).unwrap().into_inner().unwrap();
-    let totaldepth = Arc::try_unwrap(totaldepth).unwrap().into_inner().unwrap();
-    let depthx1 = Arc::try_unwrap(depthx1).unwrap().into_inner().unwrap();
-
-    let mean = totaldepth as f64 / all_length as f64;
-
-    cov_stat(&vect, &mut all_length, &mean, &depthx1);
-
+    
     let elapsed_time = start_time.elapsed();
-    println!("Total execution time: {:?}", elapsed_time);
+    println!("总执行时间: {:?}", elapsed_time);
+
 }

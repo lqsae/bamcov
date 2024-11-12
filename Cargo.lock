@@ -236,8 +236,7 @@ dependencies = [
 [[package]]
 name = "d4"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1883c652484e8ddf5801a1a9f3c3fa5c5112ac328c47351d463de1b72980c5a9"
+source = "git+https://github.com/38/d4-format#abe76cbfc0a8208d40f3e228d14c65aef1cfa4c8"
 dependencies = [
  "d4-framefile",
  "d4-hts",
@@ -254,9 +253,8 @@ dependencies = [
 
 [[package]]
 name = "d4-framefile"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc955e1da1d6cfb80ae647198c952b120d9b02658225e7f4f5ed8fd725a6c7ca"
+version = "0.3.6"
+source = "git+https://github.com/38/d4-format#abe76cbfc0a8208d40f3e228d14c65aef1cfa4c8"
 dependencies = [
  "memmap",
 ]
@@ -264,8 +262,7 @@ dependencies = [
 [[package]]
 name = "d4-hts"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58b9cf6ce8b55202d3415a9cf56b7ae160f82da402dcd58efa16a78ebd9ed381"
+source = "git+https://github.com/38/d4-format#abe76cbfc0a8208d40f3e228d14c65aef1cfa4c8"
 dependencies = [
  "bindgen",
  "pkg-config",
