@@ -104,11 +104,11 @@ TotalBases  CovBases    CovRatio  Ave_Depth  Depth>=10X  Depth>=20X  Depth>=40X 
 
 ## 作者
 
-刘庆山
+刘青山
 
 ## 版本历史
 
-- v0.1.0 (2024-01)
+- v0.1.0 (2024-11)
   - 初始版本发布
   - 支持基本的覆盖度统计
   - 添加自定义深度阈值功能
