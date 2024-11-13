@@ -74,7 +74,7 @@ fn parse_region_spec<T: Iterator<Item = String>>(
 
 
 fn add_one_interval(
-    chr: & str,
+    _chr: &str,
     left: u32,
     right: u32,
     values: &[i32],
@@ -159,13 +159,13 @@ fn add_ranges <R: Read + Seek, I: Iterator<Item = String>> (
     all_length: &mut u64,
     totaldepth: &mut u64, 
     depthx1: &mut u64)  -> u32 {
-        let first =false;
+        let first = false;
         let mut path_buf = vec![];
         let mut first_found = false;
         if let Some(track_path) = track {
             path_buf.push(track_path.into());
         } else {
-            find_tracks(
+            if let Err(e) = find_tracks(
                 &mut reader,
                 |path| {
                     let stem = path
@@ -187,7 +187,10 @@ fn add_ranges <R: Read + Seek, I: Iterator<Item = String>> (
                     }
                 },
                 &mut path_buf,
-            );
+            ) {
+                eprintln!("Warning: Error finding tracks: {}", e);
+                return 1;
+            }
         }
         let file_root = Directory::open_root(reader, 8).unwrap();
         let mut readers = vec![];
@@ -241,63 +244,89 @@ fn all_d4_vec(input_filename: & str,region_file:&str, vect: & mut Vec<Range>, al
 
 
 
-fn cov_stat(interval_depth: &Vec<Range>, all_length: &mut u64, mean: &f64, depthx1: &mut u64)
+fn cov_stat(interval_depth: &Vec<Range>, all_length: &mut u64, mean: &f64, depthx1: &mut u64, thresholds: Option<Vec<u16>>)
 {
     let mut idx :u64 = 0;
     let mut  x1:u64 = 0;
-    let mut  x10:u64 = 0;
-    let mut  x20:u64 = 0;
-    let mut  x30:u64 = 0;
-    let mut  x50:u64 = 0;
-
+    // 使用HashMap存储不同阈值的覆盖度
+    let mut threshold_coverage: HashMap<u16, u64> = HashMap::new();
+    
     let idx_q20: u64 = (*depthx1)*2 /10;
     let mut variance:f64= 0.0;
     let mut  q20 :u16 = 0;
     let mut jixu: bool = true;
 
-    // 计算 q20% 
     let mut large_avg_20: u64 = 0;
     let mut less_avg_20: u64 = 0;
     let avg_p20 = (*mean as f64) * 0.2;
 
-
-    for range_value in interval_depth.iter()
-    {
+    for range_value in interval_depth.iter() {
         let value = range_value.value;
         let length = range_value.length as u64;
         if value >=1 {x1+=length; idx += length;}
-        if value >=10 {x10+=length; }
-        if value >=20 {x20+=length;}
-        if value >=30 {x30+=length;}
-        if value >=50 {x50+=length;}
-        let dis = (value as f64) - mean;
-        let pow2 = dis*dis ;
-        variance +=  pow2 * (length as f64);
-        if jixu {
-            if idx >= idx_q20{
-                q20 = value; 
-                jixu =false;}
+        
+        // 计算每个阈值的覆盖度
+        if let Some(ref thresholds) = thresholds {
+            for &t in thresholds {
+                if value >= t {
+                    *threshold_coverage.entry(t).or_insert(0) += length;
+                }
+            }
         }
 
-        if (value as f64)  > avg_p20 { large_avg_20 +=length;}
-        else {less_avg_20 +=length;}
-    }
+        let dis = (value as f64) - mean;
+        let pow2 = dis*dis;
+        variance += pow2 * (length as f64);
+        if jixu {
+            if idx >= idx_q20 {
+                q20 = value;
+                jixu = false;
+            }
+        }
 
+        if (value as f64) > avg_p20 { large_avg_20 += length; }
+        else { less_avg_20 += length; }
+    }
 
     let all_lenth_f64 = all_length.clone() as f64;
     variance /= all_lenth_f64;
-    let  std_deviation = variance.sqrt();
-    let x1_cov = (x1 as f64)  / all_lenth_f64 * 100.0;
-    let x10_cov = (x10 as f64)  / all_lenth_f64 * 100.0 ;
-    let x20_cov = (x20 as f64)  / all_lenth_f64* 100.0;
-    let x30_cov = (x30 as f64)  / all_lenth_f64* 100.0;
-    let x50_cov = (x50 as f64)  / all_lenth_f64* 100.0;
+    let std_deviation = variance.sqrt();
+    let x1_cov = (x1 as f64) / all_lenth_f64 * 100.0;
     let fold80 = (q20 as f64) / mean;
-    let cv =  std_deviation / mean;
+    let cv = std_deviation / mean;
+    let q20_cov = (large_avg_20 as f64) / ((large_avg_20 + less_avg_20) as f64) * 100.0;
 
-    let q20_cov = (large_avg_20 as f64 ) / ((large_avg_20 + less_avg_20 ) as f64) *100.0;
-    println!("TotalBases\tCovBases\tCovRatio\tAve_Depth(X)\tDepth>=1X\tDepth>=10X\tDepth>=20X\tDepth>=30X\tDepth>=50X\tFold80\tCV\t>=20%X");
-    println!("{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}", all_length, x1, x1_cov, mean, x1_cov, x10_cov, x20_cov, x30_cov, x50_cov, fold80, cv, q20_cov);
+    if let Some(thresholds) = thresholds {
+        // 构建表头
+        print!("TotalBases\tCovBases\tCovRatio\tAve_Depth(X)");
+        for t in &thresholds {
+            print!("\tDepth>={t}X");
+        }
+        println!("\tFold80\tCV\t>=20%X");
+
+        // 构建数据行
+        print!("{}\t{}\t{:.3}\t{:.3}", all_length, x1, x1_cov, mean);
+        for t in &thresholds {
+            let cov = (*threshold_coverage.get(t).unwrap_or(&0) as f64) / all_lenth_f64 * 100.0;
+            print!("\t{:.3}", cov);
+        }
+        println!("\t{:.3}\t{:.3}\t{:.3}", fold80, cv, q20_cov);
+    } else {
+        // 原有的默认输出格式
+        println!("TotalBases\tCovBases\tCovRatio\tAve_Depth(X)\tDepth>=1X\tDepth>=10X\tDepth>=20X\tDepth>=30X\tDepth>=50X\tFold80\tCV\t>=20%X");
+        
+        // 默认深度阈值的覆盖度
+        let default_thresholds = [1u16, 10, 20, 30, 50];
+        let default_coverages: Vec<f64> = default_thresholds.iter()
+            .map(|&t| (*threshold_coverage.get(&t).unwrap_or(&0) as f64) / all_lenth_f64 * 100.0)
+            .collect();
+
+        println!("{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}", 
+            all_length, x1, x1_cov, mean,
+            default_coverages[0], default_coverages[1], default_coverages[2], 
+            default_coverages[3], default_coverages[4],
+            fold80, cv, q20_cov);
+    }
 }
 
 
@@ -318,6 +347,11 @@ fn main() {
             .takes_value(true)
             .required(true)
             .help("输入为bed文件格式"))
+        .arg(Arg::with_name("threshold")
+            .short("t")
+            .long("threshold")
+            .takes_value(true)
+            .help("设置深度阈值，多个值用逗号分隔，例如: 10,20,30"))
         .get_matches();
 
         let input_filename :&str= args
@@ -331,6 +365,12 @@ fn main() {
 
     let start_time = Instant::now();
 
+    let thresholds = args.value_of("threshold").map(|t| {
+        t.split(',')
+            .map(|s| s.trim().parse::<u16>()
+                .expect("阈值必须是有效的正整数"))
+            .collect::<Vec<u16>>()
+    });
 
     let mut all_length:u64 = 0;
     let mut totaldepth:u64 = 0;
@@ -339,10 +379,10 @@ fn main() {
     all_d4_vec(input_filename, region_file, &mut interval_depth, &mut all_length, &mut totaldepth, &mut depthx1);
     let start2 = Instant::now();
     interval_depth.par_sort_unstable_by(|a, b| b.value.cmp(&a.value));
-    let duration2 = start2.elapsed();
-    //println!("排序用时: {:?}", duration2);
+    let _duration2 = start2.elapsed();
+    //println!("排序用时: {:?}", _duration2);
     let mean: f64 = (totaldepth as f64) / (all_length as f64);
-    cov_stat(& interval_depth, & mut all_length, & mean, &mut depthx1); 
+    cov_stat(&interval_depth, &mut all_length, &mean, &mut depthx1, thresholds); 
 
     // 在主要处理完成后，记录最终内存使用和 CPU 时间
 
