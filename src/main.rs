@@ -260,17 +260,21 @@ fn cov_stat(interval_depth: &Vec<Range>, all_length: &mut u64, mean: &f64, depth
     let mut less_avg_20: u64 = 0;
     let avg_p20 = (*mean as f64) * 0.2;
 
+    // 定义默认阈值
+    let default_thresholds: Vec<u16> = vec![1, 10, 20, 30, 50];
+    
+    // 计算每个区间的覆盖度
     for range_value in interval_depth.iter() {
         let value = range_value.value;
         let length = range_value.length as u64;
         if value >=1 {x1+=length; idx += length;}
         
         // 计算每个阈值的覆盖度
-        if let Some(ref thresholds) = thresholds {
-            for &t in thresholds {
-                if value >= t {
-                    *threshold_coverage.entry(t).or_insert(0) += length;
-                }
+        let thresholds_to_check = thresholds.as_ref().unwrap_or(&default_thresholds);
+        
+        for &t in thresholds_to_check {
+            if value >= t {
+                *threshold_coverage.entry(t).or_insert(0) += length;
             }
         }
 
@@ -288,7 +292,7 @@ fn cov_stat(interval_depth: &Vec<Range>, all_length: &mut u64, mean: &f64, depth
         else { less_avg_20 += length; }
     }
 
-    let all_lenth_f64 = all_length.clone() as f64;
+    let all_lenth_f64 = *all_length as f64;
     variance /= all_lenth_f64;
     let std_deviation = variance.sqrt();
     let x1_cov = (x1 as f64) / all_lenth_f64 * 100.0;
@@ -297,14 +301,13 @@ fn cov_stat(interval_depth: &Vec<Range>, all_length: &mut u64, mean: &f64, depth
     let q20_cov = (large_avg_20 as f64) / ((large_avg_20 + less_avg_20) as f64) * 100.0;
 
     if let Some(thresholds) = thresholds {
-        // 构建表头
+        // 自定义阈值的输出
         print!("TotalBases\tCovBases\tCovRatio\tAve_Depth(X)");
         for t in &thresholds {
             print!("\tDepth>={t}X");
         }
         println!("\tFold80\tCV\t>=20%X");
 
-        // 构建数据行
         print!("{}\t{}\t{:.3}\t{:.3}", all_length, x1, x1_cov, mean);
         for t in &thresholds {
             let cov = (*threshold_coverage.get(t).unwrap_or(&0) as f64) / all_lenth_f64 * 100.0;
@@ -312,20 +315,15 @@ fn cov_stat(interval_depth: &Vec<Range>, all_length: &mut u64, mean: &f64, depth
         }
         println!("\t{:.3}\t{:.3}\t{:.3}", fold80, cv, q20_cov);
     } else {
-        // 原有的默认输出格式
+        // 默认阈值的输出
         println!("TotalBases\tCovBases\tCovRatio\tAve_Depth(X)\tDepth>=1X\tDepth>=10X\tDepth>=20X\tDepth>=30X\tDepth>=50X\tFold80\tCV\t>=20%X");
         
-        // 默认深度阈值的覆盖度
-        let default_thresholds = [1u16, 10, 20, 30, 50];
-        let default_coverages: Vec<f64> = default_thresholds.iter()
-            .map(|&t| (*threshold_coverage.get(&t).unwrap_or(&0) as f64) / all_lenth_f64 * 100.0)
-            .collect();
-
-        println!("{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}", 
-            all_length, x1, x1_cov, mean,
-            default_coverages[0], default_coverages[1], default_coverages[2], 
-            default_coverages[3], default_coverages[4],
-            fold80, cv, q20_cov);
+        print!("{}\t{}\t{:.3}\t{:.3}", all_length, x1, x1_cov, mean);
+        for &t in &default_thresholds {
+            let cov = (*threshold_coverage.get(&t).unwrap_or(&0) as f64) / all_lenth_f64 * 100.0;
+            print!("\t{:.3}", cov);
+        }
+        println!("\t{:.3}\t{:.3}\t{:.3}", fold80, cv, q20_cov);
     }
 }
 
