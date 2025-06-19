@@ -121,7 +121,6 @@ TotalBases  CovBases    CovRatio  Ave_Depth  Depth>=10X  Depth>=20X  Depth>=40X 
 
 ## 作者
 
-刘青山
 
 ## 许可证
 
